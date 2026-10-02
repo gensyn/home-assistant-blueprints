@@ -1,0 +1,154 @@
+blueprint:
+  name: Task Tracker - Notify about due tasks
+  description: 'Send a mobile app notification for each due or due-soon task at a
+    specified time each day. Only tasks whose notification count is a multiple of
+    their notification_interval will trigger a notification, preventing repeated daily
+    alerts.
+
+    The notify action, tags, language, which states trigger a notification, and the
+    maximum number of notifications can be customised via the blueprint inputs.'
+  domain: automation
+  input:
+    notification_time:
+      name: Notification time
+      description: Time of day to check for due tasks and send notifications.
+      selector:
+        time: {}
+    notify_action:
+      name: Notify action
+      description: The notify action to call (e.g. notify.mobile_app_my_phone).
+      selector:
+        text:
+          multiline: false
+          multiple: false
+    tags:
+      name: Tags
+      description: The tags that must be present in a task's tags attribute for the
+        notification to be sent.
+      default: []
+      selector:
+        text:
+          multiple: true
+          multiline: false
+    language:
+      name: Language
+      description: Language used for notification messages.
+      default: en
+      selector:
+        language:
+          languages:
+          - en
+          - de
+          - fr
+          native_name: false
+          no_sort: false
+    notify_states:
+      name: Notify for states
+      description: Which task states should trigger a notification. "due" notifies
+        only when the task is overdue. "due_soon" notifies only when the task is coming
+        up. "both" notifies for either state.
+      default: due
+      selector:
+        select:
+          options:
+          - label: Due
+            value: due
+          - label: Due soon
+            value: due_soon
+          - label: Both
+            value: both
+          multiple: false
+          custom_value: false
+          sort: false
+    max_notifications:
+      name: Maximum number of notifications
+      description: How many times to notify for each task. Set to 0 to notify indefinitely.
+        The count of notifications already sent is derived from the task's overdue_by
+        (for due tasks) or days into the due-soon window (for due_soon tasks) divided
+        by its notification_interval.
+      default: 0
+      selector:
+        number:
+          min: 0.0
+          max: 365.0
+          step: 1.0
+          mode: box
+triggers:
+- trigger: time
+  at: !input notification_time
+conditions: []
+actions:
+- variables:
+    language_tmp: !input language
+    language: "{{\n  language_tmp\n  if language_tmp is string and language_tmp in
+      [\"de\", \"fr\"]\n  else \"en\"\n}}\n"
+    notify_states: !input notify_states
+    max_notifications: !input max_notifications
+    mui:
+      en:
+        due_since_today: due today
+        due_since_yesterday: due since yesterday
+        due_since_days: due since %d days
+        due_soon: coming up in %d days
+        due_soon_tomorrow: due tomorrow
+      de:
+        due_since_today: heute fällig
+        due_since_yesterday: seit gestern fällig
+        due_since_days: seit %d Tagen fällig
+        due_soon: fällig in %d Tagen
+        due_soon_tomorrow: morgen fällig
+      fr:
+        due_since_today: à faire aujourd'hui
+        due_since_yesterday: dû depuis hier
+        due_since_days: dû depuis %d jours
+        due_soon: prévu dans %d jours
+        due_soon_tomorrow: prévu demain
+    tasks: "{%- set ns = namespace(items=[]) -%}\n{%- for entity_id in integration_entities('task_tracker')
+      -%}\n  {%- set s = states[entity_id] -%}\n  {%- if entity_id.startswith('sensor.')
+      -%}\n    {%- set state = s.state -%}\n    {%- set notification_interval = s.attributes.notification_interval
+      | default(None) -%}\n    {%- if notification_interval is not none -%}\n      {%-
+      if state == \"due\" and notify_states in [\"due\", \"both\"] -%}\n        {%-
+      set overdue_by = s.attributes.overdue_by | default(None) -%}\n        {%- if
+      overdue_by is not none and overdue_by % notification_interval == 0 -%}\n          {%-
+      set times_notified = (overdue_by // notification_interval) + 1 -%}\n          {%-
+      if max_notifications == 0 or times_notified <= max_notifications -%}\n            {%-
+      set ns.items = ns.items + [entity_id] -%}\n          {%- endif -%}\n        {%-
+      endif -%}\n      {%- elif state == \"due_soon\" and notify_states in [\"due_soon\",
+      \"both\"] -%}\n        {%- set due_in = s.attributes.due_in | default(None)
+      -%}\n        {%- set due_soon_days = s.attributes.due_soon_days | default(None)
+      -%}\n        {%- if due_in is not none and due_soon_days is not none -%}\n          {%-
+      set days_into_window = due_soon_days - due_in -%}\n          {%- if days_into_window
+      % notification_interval == 0 -%}\n            {%- set times_notified = (days_into_window
+      // notification_interval) + 1 -%}\n            {%- if max_notifications == 0
+      or times_notified <= max_notifications -%}\n              {%- set ns.items =
+      ns.items + [entity_id] -%}\n            {%- endif -%}\n          {%- endif -%}\n
+      \       {%- endif -%}\n      {%- endif -%}\n    {%- endif -%}\n  {%- endif -%}\n{%-
+      endfor -%}\n{{ ns.items }}"
+    configured_tags: !input tags
+- repeat:
+    for_each: '{{ tasks }}'
+    sequence:
+    - alias: Notify User
+      if:
+      - condition: template
+        value_template: '{{ configured_tags | select(''in'', states[repeat.item].attributes.tags
+          | default([])) | list | length == configured_tags | length }}'
+      then:
+      - action: !input notify_action
+        data:
+          title: '{{ states[repeat.item].attributes.friendly_name }}'
+          message: "{%- set attrs = states[repeat.item].attributes -%} {%- if states[repeat.item].state
+            == \"due_soon\" -%}\n  {%- set due_in = attrs.due_in -%}\n  {%- if due_in
+            == 1 -%}\n    {{ mui[language].due_soon_tomorrow }}\n  {%- else -%}\n
+            \   {{ mui[language].due_soon | replace('%d', due_in | string) }}\n  {%-
+            endif -%}\n{%- else -%}\n  {%- set overdue_by = attrs.overdue_by -%}\n
+            \ {%- if overdue_by == 0 -%}\n    {{ mui[language].due_since_today }}\n
+            \ {%- elif overdue_by == 1 -%}\n    {{ mui[language].due_since_yesterday
+            }}\n  {%- else -%}\n    {{ mui[language].due_since_days | replace('%d',
+            overdue_by | string) }}\n  {%- endif -%}\n{%- endif -%}"
+          data:
+            tag: '{{ repeat.item }}'
+            color: green
+            group: '{{ repeat.item }}'
+            notification_icon: '{{ states[repeat.item].attributes.icon }}'
+mode: single
