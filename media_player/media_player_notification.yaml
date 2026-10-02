@@ -16,11 +16,11 @@ blueprint:
           filter:
             - domain: media_player
 
-    notify_services:
-      name: Notification services
+    notify_targets:
+      name: Notification targets
       description: >
-        One or more notification service actions to call. Enter complete
-        service names, for example notify.mobile_app_phone or notify.chandler.
+        One or more notify service names without the notify. prefix.
+        For example: chandler or mobile_app_pixel_7.
       selector:
         text:
           multiple: true
@@ -29,7 +29,7 @@ blueprint:
       name: Action prefix
       description: >
         Unique prefix for notification actions and the notification tag.
-        Use a different prefix for each media player notification automation.
+        Use a different prefix for each media-player notification automation.
       default: media_player
       selector:
         text:
@@ -67,7 +67,7 @@ max_exceeded: silent
 
 variables:
   player: !input media_player
-  notify_services: !input notify_services
+  notify_targets: !input notify_targets
   prefix: !input action_prefix
   icon: !input notification_icon
   group_leader_only: !input only_group_leader
@@ -145,7 +145,8 @@ actions:
             value_template: "{{ is_group_leader | bool }}"
 
         sequence:
-          # Metadata can arrive shortly after the playing state.
+          # Some media players change to playing before their metadata is
+          # available.
           - wait_template: >-
               {{
                 state_attr(player, 'media_title') is not none
@@ -227,7 +228,7 @@ actions:
                       entity_id: !input media_player
 
           # The mobile app dismisses the notification when an action is
-          # pressed. Give the media player time to update before recreating it.
+          # pressed. Allow the media player state to update before recreating it.
           - delay:
               milliseconds: 50
 
@@ -242,9 +243,9 @@ actions:
 
         sequence:
           - repeat:
-              for_each: "{{ notify_services }}"
+              for_each: "{{ notify_targets }}"
               sequence:
-                - action: "{{ repeat.item }}"
+                - action: "notify.{{ repeat.item }}"
                   data:
                     message: clear_notification
                     data:
@@ -252,12 +253,11 @@ actions:
 
           - stop: Notification cleared
 
-    # Any event that did not match a valid branch is ignored.
     default:
       - stop: Ignored trigger
 
-  # If this was a play action, wait for the player to actually become
-  # playing before rendering the replacement notification.
+  # For a play action, wait for the player to become playing and expose
+  # metadata before rendering the replacement notification.
   - if:
       - condition: state
         entity_id: !input media_player
@@ -272,9 +272,8 @@ actions:
           seconds: 10
         continue_on_timeout: true
 
-  # Do not recreate a notification for a track-title change that occurred
-  # while the player was paused, or for a button action when the player is
-  # neither playing nor paused.
+  # Do not recreate a notification for a track change while paused, or for
+  # an action when the player is neither playing nor paused/idle.
   - condition: template
     value_template: >-
       {{
@@ -292,7 +291,7 @@ actions:
   - condition: template
     value_template: "{{ is_group_leader | bool }}"
 
-  # Read the metadata after any wait and after any media-player action.
+  # Read metadata after any wait and after any media-player action.
   - variables:
       current_artist: "{{ state_attr(player, 'media_artist') or '' }}"
       current_track: "{{ state_attr(player, 'media_title') or '' }}"
@@ -311,7 +310,7 @@ actions:
       current_artwork: "{{ state_attr(player, 'entity_picture') }}"
 
   # ---------------------------------------------------------------
-  # Recreate the notification using the current state
+  # Recreate the notification using the current player state
   # ---------------------------------------------------------------
   - choose:
       # Playing notification
@@ -319,11 +318,12 @@ actions:
           - condition: state
             entity_id: !input media_player
             state: playing
+
         sequence:
           - repeat:
-              for_each: "{{ notify_services }}"
+              for_each: "{{ notify_targets }}"
               sequence:
-                - action: "{{ repeat.item }}"
+                - action: "notify.{{ repeat.item }}"
                   data:
                     title: "{{ current_title }}"
                     message: "{{ current_message }}"
@@ -351,11 +351,12 @@ actions:
             state:
               - paused
               - idle
+
         sequence:
           - repeat:
-              for_each: "{{ notify_services }}"
+              for_each: "{{ notify_targets }}"
               sequence:
-                - action: "{{ repeat.item }}"
+                - action: "notify.{{ repeat.item }}"
                   data:
                     title: "{{ current_title }}"
                     message: "{{ current_message }}"
