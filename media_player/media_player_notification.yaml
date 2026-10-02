@@ -131,7 +131,6 @@ actions:
             entity_id: !input media_player
             state: playing
           - "{{ is_leader }}"
-          - "{{ track or artist }}"
         sequence:
           - repeat:
               for_each: "{{ targets }}"
