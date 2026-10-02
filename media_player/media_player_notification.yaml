@@ -1,51 +1,62 @@
 blueprint:
   name: Media Player Notification
   description: >
-    Sends a sticky, actionable notification while a media player is playing,
-    updates it on track changes, switches to a "play" action when paused,
-    and clears it after the player has been idle/paused for a while.
+    Creates a persistent actionable notification for a media player. The
+    notification is shown while playing or paused, updated when the track
+    changes, recreated after notification actions, and cleared after the
+    configured paused or idle timeout.
   domain: automation
+
   input:
     media_player:
-      name: Media Player
+      name: Media player
+      description: Media player to monitor and control.
       selector:
         entity:
           filter:
-            domain: media_player
-    notify_targets:
-      name: Notify actions
+            - domain: media_player
+
+    notify_services:
+      name: Notification services
       description: >
-        One or more notify action names *without* the `notify.` prefix
-        (e.g. `ramone`, `mobile_app_pixel_9`).
+        One or more notification service actions to call. Enter complete
+        service names, for example notify.mobile_app_phone or notify.chandler.
       selector:
         text:
           multiple: true
+
     action_prefix:
-      name: Unique action prefix
+      name: Action prefix
       description: >
-        Must be unique per automation — it namespaces the notification action
-        buttons and the notification tag (e.g. `kitchen`).
+        Unique prefix for notification actions and the notification tag.
+        Use a different prefix for each media player notification automation.
+      default: media_player
       selector:
         text:
+
     clear_delay:
       name: Clear delay
-      description: Time paused/idle before the notification is removed.
+      description: >
+        How long the player must remain paused or idle before the notification
+        is cleared.
       default:
         hours: 0
         minutes: 10
         seconds: 0
       selector:
         duration:
+
     notification_icon:
       name: Notification icon
       default: mdi:speaker
       selector:
         icon:
+
     only_group_leader:
       name: Only notify for the group leader
       description: >
-        Skip notifications when this player is only following another player
-        in a speaker group.
+        If enabled, notifications are sent only when this player is the first
+        member of its media-player group.
       default: false
       selector:
         boolean:
@@ -56,30 +67,28 @@ max_exceeded: silent
 
 variables:
   player: !input media_player
-  targets: !input notify_targets
+  notify_services: !input notify_services
   prefix: !input action_prefix
   icon: !input notification_icon
   group_leader_only: !input only_group_leader
-  tag: "media_{{ prefix }}"
-  artist: "{{ state_attr(player, 'media_artist') }}"
-  track: "{{ state_attr(player, 'media_title') }}"
-  notification_title: >-
-    {% if artist and track %}{{ artist }} - {{ track }}
-    {% elif artist %}{{ artist }}
-    {% elif track %}{{ track }}
-    {% else %}{{ state_attr(player, 'app_name') or 'Media' }}{% endif %}
-  notification_message: "{{ state_attr(player, 'friendly_name') or player }}"
-  artwork: "{{ state_attr(player, 'entity_picture') }}"
-  is_leader: >-
+
+  notification_tag: "media_{{ prefix }}"
+
+  is_group_leader: >-
     {% set members = state_attr(player, 'group_members') %}
-    {{ not group_leader_only or members is none or members | count == 0
-       or members[0] == player }}
+    {{
+      not group_leader_only
+      or members is none
+      or members | count == 0
+      or members[0] == player
+    }}
 
 triggers:
   - id: playing
     trigger: state
     entity_id: !input media_player
     to: playing
+
   - id: paused
     trigger: state
     entity_id: !input media_player
@@ -87,6 +96,20 @@ triggers:
     to:
       - paused
       - idle
+
+  - id: track_changed
+    trigger: state
+    entity_id: !input media_player
+    attribute: media_title
+
+  - id: clear
+    trigger: state
+    entity_id: !input media_player
+    to:
+      - paused
+      - idle
+    for: !input clear_delay
+
   - id: stopped
     trigger: state
     entity_id: !input media_player
@@ -95,59 +118,224 @@ triggers:
       - standby
       - unavailable
       - unknown
-  - id: clear
-    trigger: state
-    entity_id: !input media_player
-    to:
-      - paused
-      - idle
-    for: !input clear_delay
-  - id: change
-    trigger: state
-    entity_id: !input media_player
-    attribute: media_title
-  - id: play
+
+  - id: notification_action
     trigger: event
     event_type: mobile_app_notification_action
-    event_data:
-      action: !input action_prefix
-  # NOTE: see comment below about per-button actions
-  - id: pause
-    trigger: event
-    event_type: mobile_app_notification_action
-    event_data: {}
 
 conditions: []
 
 actions:
+  # Handle the event that started this automation run.
   - choose:
-      # ---- Playing / track changed -> full notification ----
+      # ---------------------------------------------------------------
+      # Playing or track changed
+      # ---------------------------------------------------------------
       - conditions:
           - condition: trigger
             id:
               - playing
-              - change
+              - track_changed
+
           - condition: state
             entity_id: !input media_player
             state: playing
-          - "{{ is_leader }}"
+
+          - condition: template
+            value_template: "{{ is_group_leader | bool }}"
+
+        sequence:
+          # Metadata can arrive shortly after the playing state.
+          - wait_template: >-
+              {{
+                state_attr(player, 'media_title') is not none
+                or state_attr(player, 'media_artist') is not none
+              }}
+            timeout:
+              seconds: 10
+            continue_on_timeout: true
+
+      # ---------------------------------------------------------------
+      # Paused
+      # ---------------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: paused
+
+          - condition: template
+            value_template: "{{ is_group_leader | bool }}"
+
+        sequence: []
+
+      # ---------------------------------------------------------------
+      # Notification button action
+      # ---------------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: notification_action
+
+          - condition: template
+            value_template: "{{ is_group_leader | bool }}"
+
+          - condition: template
+            value_template: >-
+              {{
+                trigger.event.data.action | default('') in [
+                  prefix ~ '_play',
+                  prefix ~ '_pause',
+                  prefix ~ '_volume_down',
+                  prefix ~ '_volume_up'
+                ]
+              }}
+
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ trigger.event.data.action == prefix ~ '_play' }}
+                sequence:
+                  - action: media_player.media_play
+                    target:
+                      entity_id: !input media_player
+
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ trigger.event.data.action == prefix ~ '_pause' }}
+                sequence:
+                  - action: media_player.media_pause
+                    target:
+                      entity_id: !input media_player
+
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ trigger.event.data.action == prefix ~ '_volume_down' }}
+                sequence:
+                  - action: media_player.volume_down
+                    target:
+                      entity_id: !input media_player
+
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ trigger.event.data.action == prefix ~ '_volume_up' }}
+                sequence:
+                  - action: media_player.volume_up
+                    target:
+                      entity_id: !input media_player
+
+          # The mobile app dismisses the notification when an action is
+          # pressed. Give the media player time to update before recreating it.
+          - delay:
+              milliseconds: 50
+
+      # ---------------------------------------------------------------
+      # Clear the notification
+      # ---------------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id:
+              - clear
+              - stopped
+
         sequence:
           - repeat:
-              for_each: "{{ targets }}"
+              for_each: "{{ notify_services }}"
               sequence:
-                - action: "notify.{{ repeat.item }}"
+                - action: "{{ repeat.item }}"
                   data:
-                    title: "{{ notification_title }}"
-                    message: "{{ notification_message }}"
+                    message: clear_notification
+                    data:
+                      tag: "{{ notification_tag }}"
+
+          - stop: Notification cleared
+
+    # Any event that did not match a valid branch is ignored.
+    default:
+      - stop: Ignored trigger
+
+  # If this was a play action, wait for the player to actually become
+  # playing before rendering the replacement notification.
+  - if:
+      - condition: state
+        entity_id: !input media_player
+        state: playing
+    then:
+      - wait_template: >-
+          {{
+            state_attr(player, 'media_title') is not none
+            or state_attr(player, 'media_artist') is not none
+          }}
+        timeout:
+          seconds: 10
+        continue_on_timeout: true
+
+  # Do not recreate a notification for a track-title change that occurred
+  # while the player was paused, or for a button action when the player is
+  # neither playing nor paused.
+  - condition: template
+    value_template: >-
+      {{
+        (
+          trigger.id in ['playing', 'paused', 'notification_action']
+          and states(player) in ['playing', 'paused', 'idle']
+        )
+        or
+        (
+          trigger.id == 'track_changed'
+          and is_state(player, 'playing')
+        )
+      }}
+
+  - condition: template
+    value_template: "{{ is_group_leader | bool }}"
+
+  # Read the metadata after any wait and after any media-player action.
+  - variables:
+      current_artist: "{{ state_attr(player, 'media_artist') or '' }}"
+      current_track: "{{ state_attr(player, 'media_title') or '' }}"
+      current_title: >-
+        {% if current_artist and current_track %}
+          {{ current_artist }} - {{ current_track }}
+        {% elif current_artist %}
+          {{ current_artist }}
+        {% elif current_track %}
+          {{ current_track }}
+        {% else %}
+          {{ state_attr(player, 'app_name') or 'Media' }}
+        {% endif %}
+      current_message: >-
+        {{ state_attr(player, 'friendly_name') or player }}
+      current_artwork: "{{ state_attr(player, 'entity_picture') }}"
+
+  # ---------------------------------------------------------------
+  # Recreate the notification using the current state
+  # ---------------------------------------------------------------
+  - choose:
+      # Playing notification
+      - conditions:
+          - condition: state
+            entity_id: !input media_player
+            state: playing
+        sequence:
+          - repeat:
+              for_each: "{{ notify_services }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: "{{ current_title }}"
+                    message: "{{ current_message }}"
                     data:
                       persistent: true
                       sticky: true
-                      tag: "{{ tag }}"
+                      tag: "{{ notification_tag }}"
                       notification_icon: "{{ icon }}"
                       channel: Media
                       group: media
                       importance: low
-                      image: "{{ artwork }}"
+                      image: "{{ current_artwork }}"
                       actions:
                         - action: "{{ prefix }}_pause"
                           title: " ⏸️"
@@ -156,70 +344,30 @@ actions:
                         - action: "{{ prefix }}_volume_up"
                           title: " 🔊"
 
-      # ---- Paused -> same notification with a play button ----
+      # Paused or idle notification
       - conditions:
-          - condition: trigger
-            id: paused
-          - "{{ is_leader }}"
+          - condition: state
+            entity_id: !input media_player
+            state:
+              - paused
+              - idle
         sequence:
           - repeat:
-              for_each: "{{ targets }}"
+              for_each: "{{ notify_services }}"
               sequence:
-                - action: "notify.{{ repeat.item }}"
+                - action: "{{ repeat.item }}"
                   data:
-                    title: "{{ notification_title }}"
-                    message: "{{ notification_message }}"
+                    title: "{{ current_title }}"
+                    message: "{{ current_message }}"
                     data:
                       persistent: true
                       sticky: true
-                      tag: "{{ tag }}"
+                      tag: "{{ notification_tag }}"
                       notification_icon: "{{ icon }}"
                       channel: Media
                       group: media
                       importance: low
-                      image: "{{ artwork }}"
+                      image: "{{ current_artwork }}"
                       actions:
                         - action: "{{ prefix }}_play"
                           title: " ▶️"
-
-      # ---- Idle timeout / off -> clear ----
-      - conditions:
-          - condition: trigger
-            id:
-              - clear
-              - stopped
-        sequence:
-          - repeat:
-              for_each: "{{ targets }}"
-              sequence:
-                - action: "notify.{{ repeat.item }}"
-                  data:
-                    message: clear_notification
-                    data:
-                      tag: "{{ tag }}"
-
-      # ---- Button presses ----
-      - conditions:
-          - "{{ trigger.platform == 'event' }}"
-        sequence:
-          - choose:
-              - conditions: "{{ trigger.event.data.action == prefix ~ '_play' }}"
-                sequence:
-                  - action: media_player.media_play
-                    target:
-                      entity_id: !input media_player
-              - conditions: "{{ trigger.event.data.action == prefix ~ '_pause' }}"
-                sequence:
-                  - action: media_player.media_pause
-                    target:
-                      entity_id: !input media_player
-              - conditions: "{{ trigger.event.data.action == prefix ~ '_volume_down' }}"
-                sequence:
-                  - action: media_player.volume_down
-                    target:
-                      entity_id: !input media_player
-              - conditions: "{{ trigger.event.data.action == prefix ~ '_volume_up' }}"
-                sequence:
-                  - action: media_player.volume_up
-                    target:
-                      entity_id: !input media_player
